@@ -1,17 +1,36 @@
 # AgentPay
 
-> **The payment infrastructure layer for AI agents.** AgentPay gives every autonomous AI agent a programmable USDC payment rail on Solana — with user-controlled spending limits, an open agent registry, and protocol-level commission revenue.
+> **The payment infrastructure layer for AI agents.** AgentPay gives every autonomous AI agent a programmable USDC payment rail on Solana — with user-controlled spending limits, an open agent registry, and protocol-level commission on every transaction.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Built on Solana](https://img.shields.io/badge/Built%20on-Solana-9945FF)](https://solana.com)
 [![USDC](https://img.shields.io/badge/Token-USDC-2775CA)](https://www.circle.com/en/usdc)
 [![Anchor](https://img.shields.io/badge/Framework-Anchor-FFA500)](https://anchor-lang.com)
+[![Status: Concept](https://img.shields.io/badge/Status-Concept-lightgrey)](#status)
+
+---
+
+## Status
+
+**This repository is currently a protocol design and architecture document. No code has been written yet.**
+
+| Component | Status |
+|-----------|--------|
+| Anchor program (on-chain) | ⬜ Not started |
+| Node.js backend | ⬜ Not started |
+| Flutter app | ⬜ Not started |
+| Agent SDK (npm) | ⬜ Not started |
+| Devnet deployment | ⬜ Not started |
+
+The README documents the intended architecture in full so contributors and potential agent integrators can evaluate and discuss the design before implementation begins. See [Roadmap](#roadmap) for the build sequence.
 
 ---
 
 ## Table of Contents
 
+- [Status](#status)
 - [Overview](#overview)
+- [Quickstart](#quickstart)
 - [How It Works](#how-it-works)
 - [Architecture](#architecture)
   - [On-Chain Program (Anchor/Rust)](#on-chain-program-anchorrust)
@@ -22,8 +41,9 @@
 - [Security Model](#security-model)
 - [Scalability Design](#scalability-design)
 - [Agent Integration Guide](#agent-integration-guide)
-- [Getting Started](#getting-started)
 - [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -53,6 +73,65 @@ A user tells their AI assistant: *"Order me dinner."*
 5. Otherwise → push notification to Flutter app for one-tap approval
 6. USDC transfers: `PDA Wallet → Food Agent ATA` (minus 0.5% protocol commission)
 7. Food Agent receives a webhook confirming payment → processes the order
+
+---
+
+## Quickstart
+
+> ⚠️ Nothing is implemented yet. These commands are the intended developer experience once the Anchor program exists. Use this section to understand what will be needed.
+
+### Prerequisites
+
+```bash
+# Required tools
+rustup install stable
+sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+cargo install --git https://github.com/coral-xyz/anchor anchor-cli
+node --version   # 20+
+flutter --version  # 3.x
+```
+
+### Build the Anchor Program (devnet)
+
+```bash
+git clone https://github.com/YASH514131/agentpay
+cd agentpay/program
+
+anchor build
+anchor deploy --provider.cluster devnet
+
+# Note the program ID printed — add it to your .env
+```
+
+### Environment Variables
+
+```bash
+# .env (backend)
+HELIUS_RPC_URL=https://rpc.helius.xyz/?api-key=YOUR_KEY
+AGENTPAY_PROGRAM_ID=<printed after anchor deploy>
+USDC_MINT=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v  # mainnet
+# devnet USDC: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+
+BACKEND_KEYPAIR=<base58>   # hot wallet — execute_payment only, no withdraw access
+DATABASE_URL=postgresql://user:pass@localhost:5432/agentpay
+REDIS_URL=redis://localhost:6379
+FCM_SERVER_KEY=<firebase_key>
+
+COMMISSION_BPS=50           # 0.5% — changeable via ProtocolConfig
+TREASURY_PUBKEY=<multisig>
+```
+
+### Not Yet Implemented
+
+The following steps will be possible once the respective components are built:
+
+```bash
+# Backend (not started)
+cd ../backend && npm run dev
+
+# Flutter app (not started)
+cd ../app && flutter run
+```
 
 ---
 
@@ -508,78 +587,12 @@ User pays: $10.00 USDC
 
 ## Security Model
 
-### Key Properties
+> ⚠️ **Not audited.** This protocol has not undergone a security audit. Do not deposit meaningful funds until an audit is completed. Contributions from security researchers are welcome.
 
-**The backend cannot drain user wallets.**
-Spending limits are enforced on-chain. The backend holds a hot keypair that can only call `execute_payment` — it cannot call `withdraw`.
+### Threat Model
 
-**The worst-case exposure is bounded.**
-If the backend is fully compromised, the attacker can trigger payments up to each user's `spending_limit_per_tx`. They cannot exceed daily limits or global caps.
+**If the backend hot keypair is compromised:**
+The attacker can call `execute_payment` on behalf of any user, but only up to each user's `spending_limit_per_tx` per transaction and `daily_limit` per 24h window. Both limits are enforced on-chain — the backend cannot override them. The attacker cannot call `withdraw`.
 
-**No private key owns the PDA.**
-PDA wallets are program-derived. Only the Anchor program can authorize transfers from them.
-
-**Replay protection.**
-Each `execute_payment` call includes an `order_ref` UUID stored on-chain. Duplicate submissions fail at the program level.
-
-**Circuit breaker.**
-`ProtocolConfig.paused = true` halts all payments globally. Controlled by a multisig.
-
-**Agent slashing (v2).**
-Agents with a SOL deposit at stake. Malicious behavior triggers a governance vote + on-chain slash instruction.
-
----
-
-## Scalability Design
-
-AgentPay is designed to scale without a rewrite.
-
-### Phase 1 — 0 to 10K users
-
-Single Node.js app (Fastify), PostgreSQL on Supabase, Redis Cloud, Helius RPC. Deploy on Fly.io. Ship fast, instrument everything.
-
-### Phase 2 — 10K to 100K users
-
-Extract Payment Orchestrator and TX Listener as independent services. Add BullMQ for async job processing. PostgreSQL read replicas. Horizontal API scaling behind AWS ALB or Cloudflare.
-
-### Phase 3 — 100K to 1M users
-
-Migrate message queue to **Kafka** (durable, high-throughput). Add **ClickHouse** for real-time analytics (commission dashboards, agent performance). Deploy to multi-region Kubernetes (GKE) with Istio service mesh for mTLS between services.
-
-### Phase 4 — 1M+ users
-
-Multi-region active-active PostgreSQL (Citus or Spanner). Global CDN. Predictive autoscaling via KEDA (triggered by Kafka consumer lag). Full OpenTelemetry traces across every payment millisecond.
-
-### Solana-Specific Considerations
-
-| Challenge | Solution |
-|-----------|---------|
-| RPC rate limits | Helius dedicated node. Never use public RPC in production. |
-| TX confirmation latency | `confirmed` commitment for UX; `finalized` for settlement. Optimistic UI immediately. |
-| TX listener reliability | Helius Geyser webhooks + independent polling fallback. Dual-source reconciliation. |
-| Account rent costs | Close empty PDA wallets on withdrawal to reclaim rent. |
-| Priority fees during congestion | Dynamic estimation via Helius `getPriorityFeeEstimate` per transaction. |
-
-### Observability
-
-Every payment emits a structured log:
-
-```json
-{
-  "event":       "payment.executed",
-  "session_id":  "uuid",
-  "user_id":     "uuid",
-  "agent_id":    "uuid",
-  "amount_usdc": 5.50,
-  "commission":  0.0275,
-  "latency_ms":  842,
-  "tx_hash":     "5xGf...",
-  "region":      "ap-south-1"
-}
-```
-
-**Target SLOs:**
-
-```
-payment_success_rate      > 99.5%
-p50_latency_ms            < 500
+**If an agent endpoint is malicious:**
+A malicious agent can return an inflated quote. The Verify Engine checks the quot
